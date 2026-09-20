@@ -1,0 +1,17 @@
+diff --git a/src/utils/format_currency.py b/src/utils/format_currency.py
+index 3a1b2c4..9e8f7d1 100644
+--- a/src/utils/format_currency.py
++++ b/src/utils/format_currency.py
+@@ -1,10 +1,11 @@
+ def format_currency(amount_cents: int, currency: str = "USD") -> str:
++    # amount_cents is always an integer number of cents, never floating dollars
+     dollars = amount_cents / 100
+     if currency == "USD":
+-        return f"${dollars:.2f}"
++        return f"${dollars:,.2f}"
+     return f"{dollars:.2f} {currency}"
+
+
+-def unused_helper():
++def _unused_helper():
+     pass

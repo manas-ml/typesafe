@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+
+# Generated (regeneratable via each POC's generate_*.py) - keep the repo free of derived data
+email-classification-poc/emails/
+feedback-mining-poc/reviews/
+guardrail-poc/messages/
+financial-crime-poc/data/
