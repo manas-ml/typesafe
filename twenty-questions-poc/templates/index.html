@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>20 Questions vs Jev</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --border: #2a2e37;
+    --text: #e8e8ea;
+    --muted: #9098a8;
+    --accent: #5b8def;
+    --bubble-jev: #232733;
+    --bubble-you: #2d4a7c;
+    --green: #4caf50;
+    --red: #d0554a;
+    --yellow: #c9a227;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; text-align: center; max-width: 38rem; }
+  .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 60rem; }
+  .chat-col { flex: 1 1 380px; max-width: 480px; }
+  .chat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1rem; height: 460px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem;
+  }
+  .bubble { max-width: 85%; padding: 0.6rem 0.9rem; border-radius: 10px; font-size: 0.92rem; line-height: 1.4; }
+  .bubble.jev { background: var(--bubble-jev); align-self: flex-start; }
+  .bubble.you { background: var(--bubble-you); align-self: flex-end; }
+  .bubble.system { background: transparent; color: var(--muted); align-self: center; font-size: 0.82rem; text-align: center; }
+  .round-tag { color: var(--muted); font-size: 0.75rem; margin-bottom: 0.2rem; }
+  .controls { display: flex; gap: 0.6rem; margin-top: 1rem; justify-content: center; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 0.55rem 1.1rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button.secondary { background: var(--bubble-jev); color: var(--text); }
+  button:disabled { background: var(--border); cursor: not-allowed; }
+  .panel {
+    width: 320px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem; max-height: 460px; overflow-y: auto;
+  }
+  .panel h2 { font-size: 0.85rem; color: var(--muted); margin: 0 0 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .cand-row { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+  .cand-row:last-child { border-bottom: none; }
+  .meta { color: var(--muted); font-size: 0.78rem; margin-top: 0.5rem; line-height: 1.4; }
+  .badge { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.3rem; }
+  .badge.jev { background: rgba(91,141,239,0.2); color: var(--accent); }
+  .badge.fallback { background: rgba(201,162,39,0.2); color: var(--yellow); }
+</style>
+</head>
+<body>
+  <h1>20 Questions vs Jev</h1>
+  <p class="subtitle">
+    Think of something well-known — an animal, everyday object, real person,
+    fictional character, or place — and answer honestly. A code-owned loop
+    tracks belief over ~110 candidates using a precomputed answer matrix;
+    Jev makes two live judgment calls each round: which question to ask next,
+    and when to commit to a guess.
+  </p>
+
+  <div class="controls">
+    <button id="startBtn">Think of something, then click here</button>
+  </div>
+
+  <div class="layout">
+    <div class="chat-col">
+      <div class="chat" id="chat"></div>
+      <div class="controls" id="answerControls"></div>
+    </div>
+    <div class="panel">
+      <h2>Jev's current top candidates</h2>
+      <div id="candidates"></div>
+      <div class="meta" id="roundMeta"></div>
+    </div>
+  </div>
+
+<script>
+const chat = document.getElementById("chat");
+const answerControls = document.getElementById("answerControls");
+const candidatesPanel = document.getElementById("candidates");
+const roundMeta = document.getElementById("roundMeta");
+const startBtn = document.getElementById("startBtn");
+
+let gameId = null;
+let pendingType = null; // "question" | "guess"
+
+function addBubble(text, cls, roundLabel) {
+  const wrap = document.createElement("div");
+  if (roundLabel) {
+    const tag = document.createElement("div");
+    tag.className = "round-tag";
+    tag.textContent = roundLabel;
+    wrap.appendChild(tag);
+  }
+  const bubble = document.createElement("div");
+  bubble.className = "bubble " + cls;
+  bubble.innerHTML = text;
+  wrap.appendChild(bubble);
+  chat.appendChild(wrap);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function renderJevBadges(info, label) {
+  if (!info) return "";
+  let badge = "";
+  if (info.jev_confidence !== undefined && info.jev_confidence !== null) {
+    badge += `<span class="badge jev">${label} conf ${info.jev_confidence.toFixed(2)}</span>`;
+  }
+  if (info.used_fallback) {
+    badge += `<span class="badge fallback">fallback: ${info.fallback_reason || "n/a"}</span>`;
+  }
+  return badge;
+}
+
+async function callApi(path, body) {
+  const resp = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await resp.json();
+  if (!resp.ok || data.error) throw new Error(data.error || ("request failed: " + resp.status));
+  return data;
+}
+
+function setAnswerButtons(kind) {
+  answerControls.innerHTML = "";
+  if (kind === "yesno") {
+    ["yes", "no", "unsure"].forEach((val) => {
+      const b = document.createElement("button");
+      b.textContent = val[0].toUpperCase() + val.slice(1);
+      if (val === "unsure") b.className = "secondary";
+      b.onclick = () => submitAnswer(val);
+      answerControls.appendChild(b);
+    });
+  } else if (kind === "guess") {
+    const yes = document.createElement("button");
+    yes.textContent = "Yes, correct!";
+    yes.onclick = () => submitGuessFeedback(true);
+    const no = document.createElement("button");
+    no.textContent = "No, guess again";
+    no.className = "secondary";
+    no.onclick = () => submitGuessFeedback(false);
+    answerControls.appendChild(yes);
+    answerControls.appendChild(no);
+  }
+}
+
+function renderCandidates(response) {
+  // Best-effort: we don't send full weights to the client each round (keeps
+  // payloads small); show what the response gives us for guesses, and a
+  // generic note otherwise.
+  if (response.entity_name) {
+    candidatesPanel.innerHTML = `<div class="cand-row"><span>${response.entity_name}</span><span>guess #${response.guess_attempt}</span></div>`;
+  }
+  roundMeta.textContent = `Round ${response.round}${response.max_rounds ? " / " + response.max_rounds : ""}`;
+}
+
+function handleResponse(response) {
+  gameId = response.game_id || gameId;
+
+  if (response.type === "question") {
+    pendingType = "question";
+    const badges = renderJevBadges(response.question_info, "question pick");
+    addBubble(`${response.question_text} ${badges}`, "jev", `Round ${response.round}`);
+    setAnswerButtons("yesno");
+    roundMeta.textContent = `Round ${response.round} / ${response.max_rounds}`;
+  } else if (response.type === "guess") {
+    pendingType = "guess";
+    const checkBadge = renderJevBadges(response.guess_check_info, "guess-now");
+    const guessBadge = renderJevBadges(response.guess_info, "final pick");
+    addBubble(`I'm confident enough to guess. ${checkBadge}`, "system");
+    addBubble(`Is it <strong>${response.entity_name}</strong>? ${guessBadge}`, "jev", `Guess attempt ${response.guess_attempt}`);
+    setAnswerButtons("guess");
+    renderCandidates(response);
+  } else if (response.type === "end") {
+    pendingType = null;
+    answerControls.innerHTML = "";
+    if (response.result === "win") {
+      addBubble(`Got it in ${response.guess_attempts} guess attempt(s) and ${response.round} question(s)! 🎉`, "system");
+    } else {
+      addBubble(`I couldn't guess it after ${response.guess_attempts} attempt(s) and ${response.round} question(s). What was it?`, "system");
+    }
+    startBtn.disabled = false;
+    startBtn.textContent = "Play again";
+  }
+}
+
+async function startGame() {
+  startBtn.disabled = true;
+  chat.innerHTML = "";
+  candidatesPanel.innerHTML = "";
+  roundMeta.textContent = "";
+  addBubble("Think of something well-known, then answer my questions honestly.", "system");
+  try {
+    const response = await callApi("/api/new_game");
+    handleResponse(response);
+  } catch (err) {
+    addBubble("Error: " + err.message, "system");
+    startBtn.disabled = false;
+  }
+}
+
+async function submitAnswer(answer) {
+  if (!gameId || pendingType !== "question") return;
+  addBubble(answer[0].toUpperCase() + answer.slice(1), "you");
+  answerControls.innerHTML = "";
+  try {
+    const response = await callApi("/api/answer", { game_id: gameId, answer });
+    handleResponse(response);
+  } catch (err) {
+    addBubble("Error: " + err.message, "system");
+  }
+}
+
+async function submitGuessFeedback(correct) {
+  if (!gameId || pendingType !== "guess") return;
+  addBubble(correct ? "Yes, correct!" : "Nope, guess again", "you");
+  answerControls.innerHTML = "";
+  try {
+    const response = await callApi("/api/guess_feedback", { game_id: gameId, correct });
+    handleResponse(response);
+  } catch (err) {
+    addBubble("Error: " + err.message, "system");
+  }
+}
+
+startBtn.addEventListener("click", startGame);
+</script>
+</body>
+</html>

@@ -7,3 +7,5 @@ email-classification-poc/emails/
 feedback-mining-poc/reviews/
 guardrail-poc/messages/
 financial-crime-poc/data/
+twenty-questions-poc/data/matrix.json
+db-trends-poc/data/

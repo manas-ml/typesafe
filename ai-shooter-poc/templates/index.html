@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Shooter — Jev-controlled Enemies</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --border: #2a2e37;
+    --text: #e8e8ea;
+    --muted: #9098a8;
+    --accent: #5b8def;
+    --green: #4caf50;
+    --red: #d0554a;
+    --yellow: #c9a227;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 0.2rem; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1rem; text-align: center; max-width: 44rem; }
+  .layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  canvas { background: #05070a; border: 2px solid var(--border); border-radius: 8px; display: block; }
+  .hud { display: flex; gap: 1rem; margin: 0.6rem 0; align-items: center; }
+  .healthbar-wrap { width: 220px; height: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .healthbar { height: 100%; background: var(--green); transition: width 0.15s; }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 0.5rem 1rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button:disabled { background: var(--border); cursor: not-allowed; }
+  .panel {
+    width: 280px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.9rem; max-height: 520px; overflow-y: auto;
+  }
+  .panel h2 { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .enemy-card { border-bottom: 1px solid var(--border); padding: 0.5rem 0; font-size: 0.8rem; }
+  .enemy-card:last-child { border-bottom: none; }
+  .enemy-card .head { font-weight: 600; margin-bottom: 0.2rem; }
+  .enemy-card .detail { color: var(--muted); line-height: 1.4; }
+  .badge { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.7rem; margin-left: 0.3rem; }
+  .badge.jev { background: rgba(91,141,239,0.2); color: var(--accent); }
+  .badge.fallback { background: rgba(201,162,39,0.2); color: var(--yellow); }
+  .overlay-msg { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 0.5rem; min-height: 1.4em; }
+  .controls-note { color: var(--muted); font-size: 0.78rem; margin-top: 0.4rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>AI Shooter — Jev-controlled Enemies</h1>
+  <p class="subtitle">
+    Code runs the real-time physics loop every frame; every couple of seconds,
+    each enemy asks Jev for its next tactic (advance / retreat / strafe /
+    hold and fire / flee) plus an aggression level, given its health, your
+    health, and distance. Between calls it just keeps executing its last
+    decision — the panel on the right shows each enemy's live reasoning.
+  </p>
+
+  <div class="hud">
+    <span>You:</span>
+    <div class="healthbar-wrap"><div class="healthbar" id="playerHealthBar" style="width:100%"></div></div>
+    <button id="startBtn">Start</button>
+  </div>
+
+  <div class="layout">
+    <div>
+      <canvas id="game" width="800" height="500"></canvas>
+      <p class="overlay-msg" id="overlayMsg"></p>
+      <p class="controls-note">WASD / arrow keys to move &middot; hold mouse button to fire toward the cursor</p>
+    </div>
+    <div class="panel">
+      <h2>Enemy decisions</h2>
+      <div id="enemyPanel"></div>
+    </div>
+  </div>
+
+<script>
+const CANVAS_W = 800, CANVAS_H = 500;
+const PLAYER_SPEED = 220, PLAYER_RADIUS = 13, PLAYER_MAX_HEALTH = 100;
+const PLAYER_FIRE_COOLDOWN = 260, PLAYER_PROJECTILE_SPEED = 520, PLAYER_DAMAGE = 14;
+const ENEMY_RADIUS = 13, ENEMY_MAX_HEALTH = 60;
+const ENEMY_BASE_SPEED = 105, ENEMY_BASE_COOLDOWN = 950, ENEMY_PROJECTILE_SPEED = 380, ENEMY_DAMAGE = 8;
+const NEAR_RANGE = 130, FAR_RANGE = 320;
+const NUM_ENEMIES = 2;
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const playerHealthBar = document.getElementById("playerHealthBar");
+const enemyPanel = document.getElementById("enemyPanel");
+const overlayMsg = document.getElementById("overlayMsg");
+const startBtn = document.getElementById("startBtn");
+
+let keys = {};
+let mouse = { x: CANVAS_W / 2, y: CANVAS_H / 2, down: false };
+let running = false;
+let lastTime = 0;
+
+let player, enemies, projectiles;
+
+function resetGame() {
+  player = { x: 120, y: CANVAS_H / 2, health: PLAYER_MAX_HEALTH, lastFireTime: -Infinity };
+  enemies = [];
+  for (let i = 0; i < NUM_ENEMIES; i++) {
+    enemies.push({
+      id: i,
+      x: CANVAS_W - 100,
+      y: 120 + i * (CANVAS_H - 240),
+      health: ENEMY_MAX_HEALTH,
+      alive: true,
+      action: "hold_and_fire",
+      speedMult: 1.0,
+      cooldownMult: 1.0,
+      aggressionScore: 1.0,
+      jevConfidence: null,
+      usedFallback: false,
+      fallbackReason: null,
+      strafeDir: Math.random() < 0.5 ? 1 : -1,
+      awaitingDecision: false,
+      nextDecisionAt: performance.now() + 300 + i * 400,
+      lastFireTime: -Infinity,
+      lowHealthTriggered: false,
+    });
+  }
+  projectiles = [];
+  renderEnemyPanel();
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+async function requestDecision(enemy) {
+  enemy.awaitingDecision = true;
+  try {
+    const resp = await fetch("/api/enemy_decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enemy_health_fraction: enemy.health / ENEMY_MAX_HEALTH,
+        player_health_fraction: player.health / PLAYER_MAX_HEALTH,
+        distance: dist(enemy.x, enemy.y, player.x, player.y),
+        near_range: NEAR_RANGE,
+        far_range: FAR_RANGE,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error || "request failed");
+
+    enemy.action = data.action;
+    enemy.jevChoice = data.jev_choice;
+    enemy.jevConfidence = data.jev_confidence;
+    enemy.usedFallback = data.used_fallback;
+    enemy.fallbackReason = data.fallback_reason;
+
+    const aggr = clamp(data.aggression_score ?? 1.5, 0, 3);
+    enemy.aggressionScore = aggr;
+    enemy.speedMult = 0.7 + (aggr / 3) * 0.7;   // ~0.7x .. 1.4x
+    enemy.cooldownMult = 1.3 - (aggr / 3) * 0.6; // ~1.3x .. 0.7x (lower = faster firing)
+    enemy.strafeDir = Math.random() < 0.5 ? 1 : -1;
+  } catch (err) {
+    enemy.usedFallback = true;
+    enemy.fallbackReason = "request error: " + err.message;
+  } finally {
+    enemy.awaitingDecision = false;
+    enemy.nextDecisionAt = performance.now() + 1600 + Math.random() * 800;
+    renderEnemyPanel();
+  }
+}
+
+function updatePlayer(dt) {
+  let dx = 0, dy = 0;
+  if (keys["w"] || keys["arrowup"]) dy -= 1;
+  if (keys["s"] || keys["arrowdown"]) dy += 1;
+  if (keys["a"] || keys["arrowleft"]) dx -= 1;
+  if (keys["d"] || keys["arrowright"]) dx += 1;
+  const len = Math.hypot(dx, dy) || 1;
+  player.x = clamp(player.x + (dx / len) * PLAYER_SPEED * dt, PLAYER_RADIUS, CANVAS_W - PLAYER_RADIUS);
+  player.y = clamp(player.y + (dy / len) * PLAYER_SPEED * dt, PLAYER_RADIUS, CANVAS_H - PLAYER_RADIUS);
+
+  const now = performance.now();
+  if (mouse.down && now - player.lastFireTime >= PLAYER_FIRE_COOLDOWN) {
+    const ang = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    projectiles.push({
+      x: player.x, y: player.y,
+      vx: Math.cos(ang) * PLAYER_PROJECTILE_SPEED, vy: Math.sin(ang) * PLAYER_PROJECTILE_SPEED,
+      owner: "player", radius: 4, damage: PLAYER_DAMAGE,
+    });
+    player.lastFireTime = now;
+  }
+}
+
+function updateEnemy(enemy, dt) {
+  if (!enemy.alive) return;
+  const now = performance.now();
+
+  if (!enemy.lowHealthTriggered && enemy.health / ENEMY_MAX_HEALTH < 0.3) {
+    enemy.lowHealthTriggered = true;
+    enemy.nextDecisionAt = now; // force an immediate re-decision
+  }
+  if (now >= enemy.nextDecisionAt && !enemy.awaitingDecision) {
+    requestDecision(enemy);
+  }
+
+  const toPlayerX = player.x - enemy.x, toPlayerY = player.y - enemy.y;
+  const d = Math.hypot(toPlayerX, toPlayerY) || 1;
+  const dirX = toPlayerX / d, dirY = toPlayerY / d;
+  const speed = ENEMY_BASE_SPEED * enemy.speedMult;
+
+  let vx = 0, vy = 0;
+  switch (enemy.action) {
+    case "advance":
+      vx = dirX * speed; vy = dirY * speed;
+      break;
+    case "retreat":
+      vx = -dirX * speed; vy = -dirY * speed;
+      break;
+    case "strafe":
+      vx = -dirY * speed * enemy.strafeDir; vy = dirX * speed * enemy.strafeDir;
+      break;
+    case "flee":
+      vx = -dirX * speed * 1.3; vy = -dirY * speed * 1.3;
+      break;
+    case "hold_and_fire":
+    default:
+      vx = 0; vy = 0;
+      break;
+  }
+  enemy.x = clamp(enemy.x + vx * dt, ENEMY_RADIUS, CANVAS_W - ENEMY_RADIUS);
+  enemy.y = clamp(enemy.y + vy * dt, ENEMY_RADIUS, CANVAS_H - ENEMY_RADIUS);
+
+  if (enemy.action !== "flee" && enemy.action !== "retreat") {
+    const cooldown = ENEMY_BASE_COOLDOWN * enemy.cooldownMult;
+    if (now - enemy.lastFireTime >= cooldown) {
+      const ang = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+      projectiles.push({
+        x: enemy.x, y: enemy.y,
+        vx: Math.cos(ang) * ENEMY_PROJECTILE_SPEED, vy: Math.sin(ang) * ENEMY_PROJECTILE_SPEED,
+        owner: "enemy", radius: 4, damage: ENEMY_DAMAGE,
+      });
+      enemy.lastFireTime = now;
+    }
+  }
+}
+
+function updateProjectiles(dt) {
+  for (const p of projectiles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+  projectiles = projectiles.filter((p) => p.x > -10 && p.x < CANVAS_W + 10 && p.y > -10 && p.y < CANVAS_H + 10);
+
+  for (const p of projectiles) {
+    if (p.hit) continue;
+    if (p.owner === "player") {
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        if (dist(p.x, p.y, e.x, e.y) < p.radius + ENEMY_RADIUS) {
+          e.health -= p.damage;
+          p.hit = true;
+          if (e.health <= 0) { e.alive = false; e.health = 0; renderEnemyPanel(); }
+          break;
+        }
+      }
+    } else if (p.owner === "enemy") {
+      if (dist(p.x, p.y, player.x, player.y) < p.radius + PLAYER_RADIUS) {
+        player.health -= p.damage;
+        p.hit = true;
+      }
+    }
+  }
+  projectiles = projectiles.filter((p) => !p.hit);
+}
+
+function checkGameOver() {
+  if (player.health <= 0) return "lose";
+  if (enemies.every((e) => !e.alive)) return "win";
+  return null;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // player
+  ctx.fillStyle = "#5b8def";
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  // aim line
+  ctx.strokeStyle = "rgba(91,141,239,0.3)";
+  ctx.beginPath();
+  ctx.moveTo(player.x, player.y);
+  ctx.lineTo(mouse.x, mouse.y);
+  ctx.stroke();
+
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    const colors = { advance: "#d0554a", retreat: "#c9a227", strafe: "#a869d6", hold_and_fire: "#e0824a", flee: "#6b7280" };
+    ctx.fillStyle = colors[e.action] || "#d0554a";
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, ENEMY_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+
+    // health bar
+    const w = 34, h = 5;
+    ctx.fillStyle = "#2a2e37";
+    ctx.fillRect(e.x - w / 2, e.y - ENEMY_RADIUS - 12, w, h);
+    ctx.fillStyle = "#4caf50";
+    ctx.fillRect(e.x - w / 2, e.y - ENEMY_RADIUS - 12, w * (e.health / ENEMY_MAX_HEALTH), h);
+
+    ctx.fillStyle = "#e8e8ea";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(e.action, e.x, e.y - ENEMY_RADIUS - 16);
+  }
+
+  ctx.fillStyle = "#f2c14e";
+  for (const p of projectiles) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function renderEnemyPanel() {
+  enemyPanel.innerHTML = "";
+  enemies.forEach((e, i) => {
+    const card = document.createElement("div");
+    card.className = "enemy-card";
+    const status = e.alive ? `${e.health}/${ENEMY_MAX_HEALTH} hp` : "defeated";
+    let badge = "";
+    if (e.jevConfidence !== null && e.jevConfidence !== undefined) {
+      badge += `<span class="badge jev">conf ${e.jevConfidence.toFixed(2)}</span>`;
+    }
+    if (e.usedFallback) {
+      badge += `<span class="badge fallback">fallback</span>`;
+    }
+    card.innerHTML = `
+      <div class="head">Enemy ${i + 1} — ${status}</div>
+      <div class="detail">
+        action: <strong>${e.action}</strong> ${badge}<br>
+        aggression: ${e.aggressionScore?.toFixed(2) ?? "n/a"}
+        ${e.fallbackReason ? `<br>fallback reason: ${e.fallbackReason}` : ""}
+      </div>
+    `;
+    enemyPanel.appendChild(card);
+  });
+}
+
+function loop(time) {
+  if (!running) return;
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  updatePlayer(dt);
+  for (const e of enemies) updateEnemy(e, dt);
+  updateProjectiles(dt);
+
+  playerHealthBar.style.width = Math.max(0, (player.health / PLAYER_MAX_HEALTH) * 100) + "%";
+  playerHealthBar.style.background = player.health < 30 ? "#d0554a" : "#4caf50";
+
+  draw();
+
+  const result = checkGameOver();
+  if (result) {
+    running = false;
+    overlayMsg.textContent = result === "win" ? "All enemies defeated — you win!" : "You were defeated.";
+    startBtn.disabled = false;
+    startBtn.textContent = "Play again";
+    return;
+  }
+  requestAnimationFrame(loop);
+}
+
+function startGame() {
+  startBtn.disabled = true;
+  overlayMsg.textContent = "";
+  resetGame();
+  running = true;
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener("keydown", (e) => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+});
+canvas.addEventListener("mousedown", () => { mouse.down = true; });
+window.addEventListener("mouseup", () => { mouse.down = false; });
+
+startBtn.addEventListener("click", startGame);
+resetGame();
+draw();
+</script>
+</body>
+</html>

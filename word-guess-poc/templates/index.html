@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Jev Word Guesser</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --border: #2a2e37;
+    --text: #e8e8ea;
+    --muted: #9098a8;
+    --green: #4caf50;
+    --yellow: #c9a227;
+    --gray: #3a3e47;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; text-align: center; max-width: 40rem; }
+  .controls { display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 0.6rem 1.2rem; font-size: 0.95rem; cursor: pointer;
+  }
+  button:disabled { background: var(--gray); cursor: not-allowed; }
+  label.checkbox { display: flex; align-items: center; gap: 0.4rem; color: var(--muted); font-size: 0.9rem; }
+  .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  .board { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; gap: 6px; }
+  .tile {
+    width: 52px; height: 52px; border: 2px solid var(--border); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; font-weight: 700; text-transform: uppercase;
+    transition: background 0.3s, border-color 0.3s;
+  }
+  .tile.G { background: var(--green); border-color: var(--green); }
+  .tile.Y { background: var(--yellow); border-color: var(--yellow); }
+  .tile.X { background: var(--gray); border-color: var(--gray); }
+  .status { margin-top: 1rem; font-size: 1rem; min-height: 1.4em; text-align: center; }
+  .panel {
+    width: 380px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem; max-height: 480px; overflow-y: auto;
+  }
+  .panel h2 { font-size: 0.9rem; color: var(--muted); margin: 0 0 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .round-card { border-bottom: 1px solid var(--border); padding: 0.6rem 0; font-size: 0.85rem; }
+  .round-card:last-child { border-bottom: none; }
+  .round-card .head { font-weight: 600; margin-bottom: 0.25rem; }
+  .round-card .detail { color: var(--muted); line-height: 1.4; }
+  .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; margin-left: 0.4rem; }
+  .badge.jev { background: rgba(91,141,239,0.2); color: var(--accent); }
+  .badge.fallback { background: rgba(201,162,39,0.2); color: var(--yellow); }
+</style>
+</head>
+<body>
+  <h1>Jev Word Guesser</h1>
+  <p class="subtitle">
+    A code-owned loop plays a Wordle-style word game to completion. Each round,
+    code narrows candidates by information gain and asks Jev a single Choice
+    question: which of the top candidates is most likely the real answer word.
+    Low-confidence Jev picks fall back to the plain top-entropy candidate.
+  </p>
+
+  <div class="controls">
+    <button id="playBtn">New Game</button>
+    <label class="checkbox">
+      <input type="checkbox" id="baselineCheck">
+      baseline (skip Jev, top-entropy only)
+    </label>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="board" id="board"></div>
+      <div class="status" id="status"></div>
+    </div>
+    <div class="panel">
+      <h2>Round-by-round</h2>
+      <div id="rounds"></div>
+    </div>
+  </div>
+
+<script>
+const MAX_GUESSES = 6;
+const board = document.getElementById("board");
+const roundsPanel = document.getElementById("rounds");
+const statusEl = document.getElementById("status");
+const playBtn = document.getElementById("playBtn");
+const baselineCheck = document.getElementById("baselineCheck");
+
+function buildEmptyBoard() {
+  board.innerHTML = "";
+  for (let r = 0; r < MAX_GUESSES; r++) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.id = "row-" + r;
+    for (let c = 0; c < 5; c++) {
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      row.appendChild(tile);
+    }
+    board.appendChild(row);
+  }
+}
+
+function fillRow(roundIndex, guess, feedback) {
+  const row = document.getElementById("row-" + roundIndex);
+  const tiles = row.querySelectorAll(".tile");
+  for (let i = 0; i < 5; i++) {
+    tiles[i].textContent = guess[i];
+    tiles[i].classList.add(feedback[i]);
+  }
+}
+
+function renderRoundCard(entry) {
+  const card = document.createElement("div");
+  card.className = "round-card";
+
+  let badge = "";
+  if (entry.jev_choice) {
+    badge = `<span class="badge jev">jev: ${entry.jev_choice} (${entry.jev_confidence?.toFixed(2)})</span>`;
+  }
+  if (entry.used_fallback) {
+    badge += `<span class="badge fallback">fallback</span>`;
+  }
+
+  const shortlistText = entry.shortlist
+    ? entry.shortlist.map(([w, e]) => `${w} (${e.toFixed(2)}b)`).join(", ")
+    : "n/a";
+
+  card.innerHTML = `
+    <div class="head">Round ${entry.round}: guessed "${entry.guess}" ${badge}</div>
+    <div class="detail">
+      feedback: ${entry.feedback} &middot; candidates remaining: ${entry.candidates_remaining}<br>
+      considered: ${shortlistText}
+      ${entry.fallback_reason ? `<br>fallback reason: ${entry.fallback_reason}` : ""}
+    </div>
+  `;
+  roundsPanel.appendChild(card);
+  roundsPanel.scrollTop = roundsPanel.scrollHeight;
+}
+
+async function playGame() {
+  playBtn.disabled = true;
+  buildEmptyBoard();
+  roundsPanel.innerHTML = "";
+  statusEl.textContent = "Playing...";
+
+  let result;
+  try {
+    const resp = await fetch("/api/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ baseline: baselineCheck.checked }),
+    });
+    if (!resp.ok) throw new Error("request failed: " + resp.status);
+    result = await resp.json();
+    if (result.error) throw new Error(result.error);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    playBtn.disabled = false;
+    return;
+  }
+
+  for (let i = 0; i < result.transcript.length; i++) {
+    const entry = result.transcript[i];
+    await new Promise((res) => setTimeout(res, 550));
+    fillRow(i, entry.guess, entry.feedback);
+    renderRoundCard(entry);
+  }
+
+  statusEl.textContent = result.won
+    ? `Solved "${result.secret}" in ${result.guesses} guess(es)!`
+    : `Failed to solve in ${MAX_GUESSES} guesses. Secret was "${result.secret}".`;
+  playBtn.disabled = false;
+}
+
+playBtn.addEventListener("click", playGame);
+buildEmptyBoard();
+</script>
+</body>
+</html>
